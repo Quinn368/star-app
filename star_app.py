@@ -39,7 +39,8 @@ st.markdown("### AppStar")
 
 alt.data_transformers.disable_max_rows()
 
-Z = 0.02          # metallicity; extension: make this a slider
+lz = st.slider("log10 metallicity", -4.0, -1.4, -1.7, step=0.05)
+Z = 10 ** lz      # metallicity (mass fraction of heavy elements)
 zr = Z / 0.02
 
 
@@ -85,6 +86,8 @@ def star_state(mass, age):
         phase = "blue supergiant" if frac < 0.4 else "red supergiant"
     elif age <= 1.10 * t_g:
         phase = "supernova"
+    elif 140 <= mass <= 260 and Z < 0.001:
+        phase = "no remnant"            # pair-instability: blown apart
     elif mass < 18 + 7 * zr:            # remnant boundary  [uses zr]
         phase = "neutron star"
     else:
@@ -120,6 +123,8 @@ def star_state(mass, age):
         T_show, L_show, R_show = 8000.0, None, None
     elif phase == "neutron star":
         T_show, L_show, R_show = 1e6, None, 1.7e-5
+    elif phase == "no remnant":
+        T_show, L_show, R_show = None, None, None
     elif phase == "black hole":
         T_show, L_show, R_show = None, None, 4.2e-6 * mass / 10
     return phase, T_show, L_show, R_show, t_ms
@@ -141,6 +146,8 @@ for lm in lms:
             colour, px = "#CDE7FF", 6.0
         elif phase == "supernova":
             colour, px = "#FFD27D", 150.0
+        elif phase == "no remnant":
+            colour, px = "rgb(0,0,0)", 1.0     # nothing left to draw
         else:
             colour = rgb_str(T)
             px = float(np.clip(14 + 26 * (np.log10(R) + 2.2), 5, 150))
@@ -198,135 +205,45 @@ portrait = alt.layer(
     readout("life:N", 422),
 ).properties(width=320, height=440)
 
-# ---- the phase plane, with the star riding the sliders ---------------
-Ml = np.unique(np.concatenate([np.geomspace(0.1, 300, 160),
-                               [0.25, 8.0, 25.0]]))
-pre_l = 0.03 * Ml ** -1.5
-ms_l = (10.0 * Ml ** -2.5 * (1 + 2.5 * np.exp(-Ml / 0.12)) + 0.0025)
-g_l = 1.15 * ms_l
-Y0 = 1e-4
-Y1 = 1.15 * (10.0 * 0.1 ** -2.5 * (1 + 2.5 * np.exp(-0.1 / 0.12))
-             + 0.0025)
+# ---- the HR diagram, with the star riding the sliders ---------------
+# static layer: the main sequence, every mass at its own T and L
+Mms = np.geomspace(0.1, 300, 200)
+ms_band = pd.DataFrame({"temp_K": SUN_T * Mms ** 0.475,
+                        "lum": Mms ** 3.5})
 
-cls_edge_T = [3700, 5200, 6000, 7500, 10000, 30000]
-cls_edge_M = [(t / SUN_T) ** (1 / 0.475) for t in cls_edge_T]
-CLS_T = {"M": 3050, "K": 4400, "G": 5500, "F": 6750, "A": 8700,
-         "B": 17000, "O": 40000}
-cls_bounds = [0.1] + cls_edge_M + [300.0]
+HR_X = alt.X("temp_K:Q", title="surface temperature (K), hot on the left",
+             scale=alt.Scale(type="log", domain=[1500, 150000],
+                             reverse=True, nice=False),
+             axis=alt.Axis(values=[2000, 3000, 5000, 10000, 20000,
+                                   50000, 100000],
+                           gridColor="#2b303b",
+                           labelColor="#c8c8c8", titleColor="#c8c8c8"))
+HR_Y = alt.Y("lum:Q", title="luminosity (suns), log scale",
+             scale=alt.Scale(type="log", domain=[1e-4, 1e6], nice=False),
+             axis=alt.Axis(values=[1e-4, 1e-2, 1, 1e2, 1e4, 1e6],
+                           gridColor="#2b303b",
+                           labelColor="#c8c8c8", titleColor="#c8c8c8"))
 
-MASS_SCALE = alt.Scale(type="log", domain=[0.1, 300], nice=False)
-AGE_SCALE = alt.Scale(type="log", domain=[Y0, Y1], nice=False)
-PX = alt.X("mass:Q", title="mass (suns), log scale",
-           scale=MASS_SCALE,
-           axis=alt.Axis(values=[0.1, 1, 10, 100],
-                         gridColor="#2b303b",
-                         labelColor="#c8c8c8", titleColor="#c8c8c8"))
-PY = alt.Y("lo:Q", title="age (billion years), log scale",
-           scale=AGE_SCALE,
-           axis=alt.Axis(values=[1e-3, 1e-2, 0.1, 1, 10, 100, 1000],
-                         gridColor="#2b303b",
-                         labelColor="#c8c8c8", titleColor="#c8c8c8"))
+main_seq = alt.Chart(ms_band).mark_line(
+    color="#5a616b", strokeWidth=10, opacity=0.6, clip=True).encode(
+    x=HR_X, y=HR_Y)
 
-
-def region(lo, hi, keep=None):
-    df = pd.DataFrame({"mass": Ml, "lo": np.clip(lo, Y0, Y1),
-                       "hi": np.clip(hi, Y0, Y1)})
-    if keep is not None:
-        df = df[keep]
-    return df[df["hi"] > df["lo"]]
-
-
-floor = np.full_like(Ml, Y0)
-ceiling = np.full_like(Ml, Y1)
-stages = [(region(floor, pre_l), "#4a3118")]                # protostar
-for n, blo, bhi in zip("MKGFABO", cls_bounds[:-1], cls_bounds[1:]):
-    seg = (Ml >= blo) & (Ml <= bhi)
-    stages.append((region(pre_l, ms_l, seg), rgb_str(CLS_T[n])))
-stages += [
-    (region(ms_l, g_l, Ml >= 0.25), "#c73b25"),             # giant
-    (region(ms_l, ceiling, Ml <= 0.25), "#b7aec4"),
-    (region(g_l, ceiling, (Ml >= 0.25) & (Ml <= 8)), "#b7aec4"),
-    (region(g_l, ceiling, (Ml >= 8) & (Ml <= 25)), "#7f7590"),
-    (region(g_l, ceiling, Ml >= 25), "#4a4256"),            # black hole
-]
-areas = [alt.Chart(df).mark_area(opacity=1, color=col).encode(
-             x=PX, y=PY, y2=alt.Y2("hi"))
-         for df, col in stages]
-
-sn_keep = Ml >= 8
-sn_line = alt.Chart(pd.DataFrame(
-    {"mass": Ml[sn_keep], "lo": np.clip(g_l[sn_keep], Y0, Y1)})
-    ).mark_line(color="#ccff00", strokeWidth=0.75).encode(x=PX, y=PY)
-uni_rule = alt.Chart(pd.DataFrame({"lo": [13.8]})).mark_rule(
-    color="#8a2be2", strokeWidth=2, strokeDash=[6, 4],
-    opacity=0.8).encode(y=PY)
-
-plane_labels = alt.Chart(pd.DataFrame({
-    "mass": [0.7, 2.5, 80],
-    "lo":   [1.2e-3, 50.0, 0.1],
-    "t":    ["protostars", "white dwarfs", "black holes"],
-    "c":    ["#f5f2ea", "#26323c", "#f5f2ea"],
-})).mark_text(fontSize=11).encode(
-    x=PX, y=PY, text="t:N",
-    color=alt.Color("c:N", scale=None, legend=None))
-uni_label = alt.Chart(pd.DataFrame(
-    {"mass": [0.105], "lo": [16.5]})).mark_text(
-    align="left", fontSize=9, color="#8a2be2").encode(
-    x=PX, y=PY, text=alt.value("age of the universe"))
-ns_label = alt.Chart(pd.DataFrame(
-    {"mass": [14.1], "lo": [0.47]})).mark_text(
-    fontSize=11, color="#f5f2ea").encode(
-    x=PX, y=PY, text=alt.value(["neutron", "stars"]))
-giants_label = alt.Chart(pd.DataFrame(
-    {"mass": [0.40], "lo": [205.0]})).mark_text(
-    fontSize=11, angle=49, color="#c73b25").encode(
-    x=PX, y=PY, text=alt.value("giants"))
-ms_label = alt.Chart(pd.DataFrame(
-    {"mass": [4.2], "lo": [0.06]})).mark_text(
-    fontSize=12, angle=47, color="#5a616b").encode(
-    x=PX, y=PY, text=alt.value("main sequence"))
-sn_label = alt.Chart(pd.DataFrame(
-    {"mass": [13], "lo": [0.038]})).mark_text(
-    fontSize=10, angle=44, color="#ccff00").encode(
-    x=PX, y=PY, text=alt.value("supernova"))
-
-cls_mid = [float(np.sqrt(blo * bhi))
-           for blo, bhi in zip(cls_bounds[:-1], cls_bounds[1:])]
-cls_lo = list(np.clip([0.548 * m ** -2 for m in cls_mid],
-                      1.5e-4, None))
-cls_lo[0] = 1.8
-cls_mid[-1] = 40.0
-cls_lo[-1] = 3.4e-4
-cls_labels = alt.Chart(pd.DataFrame({
-    "mass": cls_mid, "lo": cls_lo, "t": list("MKGFABO"),
-})).mark_text(fontSize=10, fontWeight=600, color="#26323c").encode(
-    x=PX, y=PY, text="t:N")
-
-sun_pt = alt.Chart(pd.DataFrame(
-    {"mass": [1.0], "lo": [4.6]})).mark_circle(
-    size=55, color="#1e7d32", opacity=1).encode(x=PX, y=PY)
-sun_txt = alt.Chart(pd.DataFrame(
-    {"mass": [1.0], "lo": [1.7]})).mark_text(
-    fontSize=11, fontWeight=700, color="#1e7d32").encode(
-    x=PX, y=PY, text=alt.value("Sun"))
-
-# your star, riding the slider signals via the filtered grid row
-you = alt.Chart(grid).transform_filter(pick).mark_point(
+# your star: the grid row picked by the sliders, phase-adjusted T and L
+# (neutron star, black hole, supernova and no remnant have no lum, so
+# they drop off the chart on their own)
+you = alt.Chart(grid).transform_filter(
+    pick + " && isValid(datum.lum) && isValid(datum.temp_K)"
+    ).mark_point(
     shape=("M 0 -1 L 0.24 -0.31 L 0.95 -0.31 L 0.38 0.12 L 0.59 0.81"
            " L 0 0.38 L -0.59 0.81 L -0.38 0.12 L -0.95 -0.31"
            " L -0.24 -0.31 Z"),
     filled=True, size=280, color="#FFC300",
-    stroke="#8C6A2F", strokeWidth=1.2, opacity=1).encode(
-    x=alt.X("mass:Q", scale=MASS_SCALE),
-    y=alt.Y("age:Q", scale=AGE_SCALE))
+    stroke="#8C6A2F", strokeWidth=1.2, opacity=1, clip=True).encode(
+    x=HR_X, y=HR_Y)
 
-plane = alt.layer(
-    *areas, sn_line, uni_rule, plane_labels, uni_label, ns_label,
-    giants_label, ms_label, sn_label, cls_labels, sun_pt, sun_txt,
-    you,
-).properties(width=470, height=440,
-             title=alt.Title("Stellar mass-age phase plane",
-                             color="#f0f0f0"))
+plane = alt.layer(main_seq, you).properties(
+    width=470, height=440,
+    title=alt.Title("Hertzsprung-Russell diagram", color="#f0f0f0"))
 
 chart = alt.hconcat(portrait, plane).add_params(
     m_sel, a_sel).configure(background="#000000").configure_view(
